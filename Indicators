@@ -1,0 +1,150 @@
+"""
+Emerson indicator definitions.
+
+The canonical list of indicators, their sources, thresholds, and metadata.
+These are the raw building blocks for the regime state machine.
+"""
+
+from enum import Enum
+from typing import Optional
+from pydantic import BaseModel, Field
+
+
+class FlagColor(str, Enum):
+    """Four-tier heat map from the Emerson design system."""
+    NORMAL = "normal"      # Green — within normal range
+    WATCH = "watch"        # Yellow — approaching first threshold
+    ELEVATED = "elevated"  # Orange — past action threshold
+    STRESS = "stress"      # Red — past critical threshold
+
+
+class ThresholdDirection(str, Enum):
+    """Whether breaching means the value went above or below the threshold."""
+    ABOVE = "above"  # Higher values = more stress (e.g., VIX, spreads)
+    BELOW = "below"  # Lower values = more stress (e.g., reserves, RRP)
+
+
+class IndicatorDef(BaseModel):
+    """Definition of a single monitored indicator."""
+    id: str = Field(..., description="Unique indicator ID (e.g., 'fred_dgs10')")
+    series_id: str = Field(..., description="Source series ID (e.g., 'DGS10' for FRED)")
+    source: str = Field(..., description="Data source: 'fred', 'alpha_vantage', 'manual'")
+    name: str = Field(..., description="Human-readable name")
+    composite: str = Field(..., description="Which regime composite this feeds into")
+    direction: ThresholdDirection = Field(..., description="Which direction triggers stress")
+    threshold_watch: Optional[float] = Field(None, description="Yellow threshold")
+    threshold_elevated: Optional[float] = Field(None, description="Orange threshold")
+    threshold_stress: Optional[float] = Field(None, description="Red threshold")
+    unit: str = Field(default="", description="Display unit (%, bps, $, etc.)")
+    update_frequency: str = Field(default="daily", description="Expected update cadence")
+
+
+# ──────────────────────────────────────────────────────────
+# Core FRED indicators (from developer handoff Section 4.2)
+# ──────────────────────────────────────────────────────────
+
+FRED_INDICATORS = [
+    IndicatorDef(
+        id="fred_dgs10", series_id="DGS10", source="fred",
+        name="10Y Treasury Yield", composite="rates",
+        direction=ThresholdDirection.ABOVE,
+        threshold_watch=4.5, threshold_elevated=5.0, threshold_stress=5.5,
+        unit="%", update_frequency="daily"
+    ),
+    IndicatorDef(
+        id="fred_dgs2", series_id="DGS2", source="fred",
+        name="2Y Treasury Yield", composite="rates",
+        direction=ThresholdDirection.ABOVE,
+        threshold_watch=4.5, threshold_elevated=5.0, threshold_stress=5.5,
+        unit="%", update_frequency="daily"
+    ),
+    IndicatorDef(
+        id="fred_dff", series_id="DFF", source="fred",
+        name="Effective Fed Funds Rate", composite="rates",
+        direction=ThresholdDirection.ABOVE,
+        threshold_watch=5.0, threshold_elevated=5.5, threshold_stress=6.0,
+        unit="%", update_frequency="daily"
+    ),
+    IndicatorDef(
+        id="fred_sofr", series_id="SOFR", source="fred",
+        name="SOFR Rate", composite="rates",
+        direction=ThresholdDirection.ABOVE,
+        threshold_watch=5.0, threshold_elevated=5.5, threshold_stress=6.0,
+        unit="%", update_frequency="daily"
+    ),
+    IndicatorDef(
+        id="fred_rrp", series_id="RRPONTSYD", source="fred",
+        name="Overnight Reverse Repo", composite="liquidity",
+        direction=ThresholdDirection.BELOW,
+        threshold_watch=200.0, threshold_elevated=100.0, threshold_stress=50.0,
+        unit="$B", update_frequency="daily"
+    ),
+    IndicatorDef(
+        id="fred_reserves", series_id="WTREGEN", source="fred",
+        name="Total Reserve Balances", composite="liquidity",
+        direction=ThresholdDirection.BELOW,
+        threshold_watch=3200.0, threshold_elevated=3000.0, threshold_stress=2800.0,
+        unit="$B", update_frequency="weekly"
+    ),
+    IndicatorDef(
+        id="fred_hy_oas", series_id="BAMLH0A0HYM2", source="fred",
+        name="US High Yield OAS", composite="credit",
+        direction=ThresholdDirection.ABOVE,
+        threshold_watch=400.0, threshold_elevated=500.0, threshold_stress=700.0,
+        unit="bps", update_frequency="daily"
+    ),
+    IndicatorDef(
+        id="fred_vix", series_id="VIXCLS", source="fred",
+        name="VIX", composite="volatility",
+        direction=ThresholdDirection.ABOVE,
+        threshold_watch=20.0, threshold_elevated=28.0, threshold_stress=35.0,
+        unit="", update_frequency="daily"
+    ),
+    IndicatorDef(
+        id="fred_wti", series_id="DCOILWTICO", source="fred",
+        name="WTI Crude Oil", composite="commodities",
+        direction=ThresholdDirection.ABOVE,
+        threshold_watch=85.0, threshold_elevated=95.0, threshold_stress=110.0,
+        unit="$/bbl", update_frequency="daily"
+    ),
+    IndicatorDef(
+        id="fred_dxy", series_id="DTWEXBGS", source="fred",
+        name="Trade-Weighted USD Index", composite="fx",
+        direction=ThresholdDirection.ABOVE,
+        threshold_watch=115.0, threshold_elevated=120.0, threshold_stress=125.0,
+        unit="", update_frequency="daily"
+    ),
+]
+
+# ──────────────────────────────────────────────────────────
+# Alpha Vantage tickers (from developer handoff Section 4.1)
+# ──────────────────────────────────────────────────────────
+
+ALPHA_VANTAGE_INDICATORS = [
+    IndicatorDef(
+        id="av_kre", series_id="KRE", source="alpha_vantage",
+        name="Regional Bank ETF", composite="banking",
+        direction=ThresholdDirection.BELOW,
+        threshold_watch=48.0, threshold_elevated=42.0, threshold_stress=36.0,
+        unit="$", update_frequency="daily"
+    ),
+    IndicatorDef(
+        id="av_hyg", series_id="HYG", source="alpha_vantage",
+        name="iShares High Yield Bond ETF", composite="credit",
+        direction=ThresholdDirection.BELOW,
+        threshold_watch=76.0, threshold_elevated=72.0, threshold_stress=68.0,
+        unit="$", update_frequency="daily"
+    ),
+    IndicatorDef(
+        id="av_usdjpy", series_id="USD/JPY", source="alpha_vantage",
+        name="USD/JPY Exchange Rate", composite="fx",
+        direction=ThresholdDirection.ABOVE,
+        threshold_watch=152.0, threshold_elevated=155.0, threshold_stress=160.0,
+        unit="", update_frequency="daily"
+    ),
+]
+
+# Combined canonical list
+ALL_INDICATORS = FRED_INDICATORS + ALPHA_VANTAGE_INDICATORS
+
+INDICATOR_MAP = {ind.id: ind for ind in ALL_INDICATORS}
