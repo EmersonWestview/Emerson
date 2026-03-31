@@ -1,0 +1,125 @@
+"""
+Emerson Field Notes — The Ledger.
+
+Captures two types of observations:
+  - Chart-first: user sees something on a chart, logs the observation
+  - Reading-first: user reads something (article, filing, thread), logs the insight
+
+Each note is tagged with tickers, linked to theses, and can be scored
+for outcomes later. This is the raw material for Emerson's memory system.
+"""
+
+from enum import Enum
+from typing import Optional
+from datetime import datetime
+from pydantic import BaseModel, Field
+
+
+class NoteType(str, Enum):
+    """How the observation originated."""
+    CHART = "chart"       # Saw something on a chart
+    READING = "reading"   # Read something in a source
+    IDEA = "idea"         # Spontaneous insight
+    DEBRIEF = "debrief"   # Post-event analysis
+
+
+class OutcomeScore(str, Enum):
+    """How the observation played out (scored later)."""
+    UNSCORED = "unscored"
+    CORRECT = "correct"       # Observation led to correct action
+    PARTIALLY = "partially"   # Partly right
+    WRONG = "wrong"           # Observation was wrong
+    IRRELEVANT = "irrelevant" # Didn't matter either way
+
+
+class FieldNote(BaseModel):
+    """A single field observation."""
+    id: str
+    note_type: NoteType = NoteType.IDEA
+    content: str = Field(..., description="The observation text")
+    tickers: list[str] = Field(default_factory=list, description="Tagged tickers")
+    linked_thesis_ids: list[str] = Field(default_factory=list)
+    source: str = Field(default="", description="Where the observation came from (chart, article URL, etc.)")
+    outcome: OutcomeScore = OutcomeScore.UNSCORED
+    outcome_notes: str = ""
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    scored_at: Optional[datetime] = None
+    tags: list[str] = Field(default_factory=list, description="Free-form tags for search")
+
+
+class FieldNotesStore:
+    """In-memory field notes store."""
+
+    def __init__(self):
+        self._notes: dict[str, FieldNote] = {}
+        self._counter = 0
+
+    def _next_id(self) -> str:
+        self._counter += 1
+        return f"fn_{self._counter:04d}"
+
+    def create(self, content: str, note_type: str = "idea",
+               tickers: list[str] = None, linked_thesis_ids: list[str] = None,
+               source: str = "", tags: list[str] = None) -> FieldNote:
+        note_id = self._next_id()
+        note = FieldNote(
+            id=note_id,
+            note_type=NoteType(note_type),
+            content=content,
+            tickers=tickers or [],
+            linked_thesis_ids=linked_thesis_ids or [],
+            source=source,
+            tags=tags or [],
+        )
+        self._notes[note_id] = note
+        return note
+
+    def get(self, note_id: str) -> Optional[FieldNote]:
+        return self._notes.get(note_id)
+
+    def list_all(self, limit: int = 50) -> list[FieldNote]:
+        notes = sorted(self._notes.values(), key=lambda n: n.created_at, reverse=True)
+        return notes[:limit]
+
+    def by_ticker(self, ticker: str) -> list[FieldNote]:
+        return sorted(
+            [n for n in self._notes.values() if ticker.upper() in [t.upper() for t in n.tickers]],
+            key=lambda n: n.created_at, reverse=True,
+        )
+
+    def by_thesis(self, thesis_id: str) -> list[FieldNote]:
+        return sorted(
+            [n for n in self._notes.values() if thesis_id in n.linked_thesis_ids],
+            key=lambda n: n.created_at, reverse=True,
+        )
+
+    def search(self, query: str) -> list[FieldNote]:
+        """Simple text search across content, tickers, and tags."""
+        q = query.lower()
+        results = []
+        for n in self._notes.values():
+            if (q in n.content.lower()
+                    or q in " ".join(n.tickers).lower()
+                    or q in " ".join(n.tags).lower()
+                    or q in n.source.lower()):
+                results.append(n)
+        return sorted(results, key=lambda n: n.created_at, reverse=True)
+
+    def score(self, note_id: str, outcome: str, outcome_notes: str = "") -> Optional[FieldNote]:
+        note = self._notes.get(note_id)
+        if not note:
+            return None
+        note.outcome = OutcomeScore(outcome)
+        note.outcome_notes = outcome_notes
+        note.scored_at = datetime.utcnow()
+        return note
+
+    def unscored(self) -> list[FieldNote]:
+        """Notes awaiting outcome scoring."""
+        return sorted(
+            [n for n in self._notes.values() if n.outcome == OutcomeScore.UNSCORED],
+            key=lambda n: n.created_at,
+        )
+
+    def count(self) -> int:
+        return len(self._notes)
