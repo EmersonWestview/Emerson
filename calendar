@@ -1,0 +1,164 @@
+"""
+Emerson catalyst calendar.
+
+Aggregates events from multiple sources into a unified timeline:
+  - Fixed schedule: FOMC, BoJ MPM, ECB, quarterly refunding, options expiry
+  - Economic data releases: CPI, PCE, PPI, GDP, ISM, jobs
+  - Earnings dates: for portfolio and watchlist names
+  - SEC filing deadlines: 10-K/10-Q windows
+  - User-created custom events
+
+Events don't just appear on the calendar — they activate the Weather layer
+of the trigger system. When an event is within its monitoring window
+(typically 24-48 hours before), the trigger system shifts to active mode.
+"""
+
+from enum import Enum
+from typing import Optional
+from datetime import datetime, timedelta
+from pydantic import BaseModel, Field
+
+
+class EventType(str, Enum):
+    """Calendar event categories."""
+    FED = "fed"
+    BOJ = "boj"
+    ECB = "ecb"
+    MACRO = "macro"         # CPI, PCE, PPI, GDP, ISM, jobs
+    EARNINGS = "earnings"
+    CREDIT = "credit"       # BDC marks, FDIC reports
+    TREASURY = "treasury"   # Refunding, TGA, OBBBA
+    ENERGY = "energy"       # COMEX, oil
+    FILING = "filing"       # SEC filing deadlines
+    CUSTOM = "custom"       # User-created
+
+
+class CatalystEvent(BaseModel):
+    """A single calendar event."""
+    id: str
+    date: str = Field(..., description="Event date YYYY-MM-DD")
+    label: str = Field(..., description="Event description")
+    ticker: str = Field(default="", description="Associated ticker or macro label")
+    event_type: EventType
+    linked_theses: list[str] = Field(default_factory=list, description="Linked thesis IDs or names")
+    monitoring_window_hours: int = Field(default=48, description="Hours before event to activate Weather layer")
+    notes: str = ""
+    is_recurring: bool = False
+    completed: bool = False
+    debrief: str = ""
+
+
+class CalendarStore:
+    """In-memory calendar store with persistence hooks."""
+
+    def __init__(self):
+        self._events: dict[str, CatalystEvent] = {}
+        self._counter = 0
+        self._seed_events()
+
+    def _next_id(self) -> str:
+        self._counter += 1
+        return f"evt_{self._counter:04d}"
+
+    def _seed_events(self):
+        """Seed with real events from the Emerson catalyst calendar prototype."""
+        seed_data = [
+            ("2026-03-12", "CPI Print — February data", "MACRO", "macro", ["hormuz", "debasement"]),
+            ("2026-03-18", "FOMC Meeting Day 1", "FOMC", "fed", ["debasement", "dollar_plumbing"]),
+            ("2026-03-18", "BoJ MPM Day 1 — Rate decision + Ueda presser", "BOJ", "boj", ["carry_unwind", "dollar_plumbing"]),
+            ("2026-03-19", "FOMC Decision + Dot Plot + Powell Presser", "FOMC", "fed", ["debasement", "dollar_plumbing"]),
+            ("2026-03-19", "BoJ MPM Day 2 — Statement release", "BOJ", "boj", ["carry_unwind"]),
+            ("2026-03-26", "BAH Earnings Watch", "BAH", "earnings", ["defense"]),
+            ("2026-03-27", "PCE Inflation — February data", "MACRO", "macro", ["debasement"]),
+            ("2026-04-10", "CPI Print — March data", "MACRO", "macro", ["hormuz", "debasement"]),
+            ("2026-04-15", "Tax Deadline — TGA drain begins", "TREASURY", "treasury", ["dollar_plumbing"]),
+            ("2026-04-24", "BoJ MPM — Quarterly projection review", "BOJ", "boj", ["carry_unwind"]),
+            ("2026-04-28", "FOMC Meeting Day 1", "FOMC", "fed", ["debasement", "dollar_plumbing"]),
+            ("2026-04-29", "FOMC Decision", "FOMC", "fed", ["debasement"]),
+            ("2026-05-01", "Q1 BDC Marks Begin — ARCC, BXSL, OBDC", "CREDIT", "credit", ["private_credit"]),
+            ("2026-05-05", "Quarterly Refunding Announcement", "TREASURY", "treasury", ["dollar_plumbing", "debasement"]),
+            ("2026-05-07", "RTX Earnings", "RTX", "earnings", ["defense"]),
+            ("2026-05-14", "KTOS Earnings", "KTOS", "earnings", ["defense"]),
+            ("2026-05-15", "COMEX Quarterly Inventory Report", "COMEX", "energy", ["debasement"]),
+            ("2026-06-16", "FOMC Meeting Day 1", "FOMC", "fed", ["debasement"]),
+            ("2026-06-17", "FOMC Decision", "FOMC", "fed", ["debasement"]),
+            ("2026-06-18", "BoJ MPM", "BOJ", "boj", ["carry_unwind"]),
+            ("2026-06-30", "FDIC Quarterly Banking Profile — Q1 data", "FDIC", "credit", ["private_credit", "banking_htm"]),
+            ("2026-07-06", "OBBBA R&E Amendment Deadline", "TREASURY", "treasury", ["private_credit", "debasement"]),
+            ("2026-07-15", "CRE Maturity Wall Peak Window Opens", "CRE", "credit", ["private_credit"]),
+        ]
+        for date, label, ticker, etype, theses in seed_data:
+            evt_id = self._next_id()
+            self._events[evt_id] = CatalystEvent(
+                id=evt_id, date=date, label=label, ticker=ticker,
+                event_type=EventType(etype), linked_theses=theses,
+            )
+
+    def add(self, date: str, label: str, ticker: str = "",
+            event_type: str = "custom", linked_theses: list[str] = None,
+            notes: str = "") -> CatalystEvent:
+        evt_id = self._next_id()
+        evt = CatalystEvent(
+            id=evt_id, date=date, label=label, ticker=ticker,
+            event_type=EventType(event_type),
+            linked_theses=linked_theses or [],
+            notes=notes,
+        )
+        self._events[evt_id] = evt
+        return evt
+
+    def get(self, event_id: str) -> Optional[CatalystEvent]:
+        return self._events.get(event_id)
+
+    def remove(self, event_id: str) -> bool:
+        if event_id in self._events:
+            del self._events[event_id]
+            return True
+        return False
+
+    def list_range(self, start_date: str, end_date: str) -> list[CatalystEvent]:
+        """List events in a date range (inclusive)."""
+        events = [
+            e for e in self._events.values()
+            if start_date <= e.date <= end_date
+        ]
+        return sorted(events, key=lambda e: e.date)
+
+    def list_upcoming(self, days: int = 14) -> list[CatalystEvent]:
+        """List events in the next N days."""
+        today = datetime.utcnow().strftime("%Y-%m-%d")
+        end = (datetime.utcnow() + timedelta(days=days)).strftime("%Y-%m-%d")
+        return self.list_range(today, end)
+
+    def in_monitoring_window(self) -> list[CatalystEvent]:
+        """Events currently within their monitoring window (Weather layer active)."""
+        now = datetime.utcnow()
+        active = []
+        for e in self._events.values():
+            try:
+                evt_dt = datetime.strptime(e.date, "%Y-%m-%d")
+                window_start = evt_dt - timedelta(hours=e.monitoring_window_hours)
+                if window_start <= now <= evt_dt + timedelta(hours=12):
+                    active.append(e)
+            except ValueError:
+                continue
+        return sorted(active, key=lambda e: e.date)
+
+    def by_thesis(self, thesis_name: str) -> list[CatalystEvent]:
+        """Find all events linked to a thesis."""
+        return sorted(
+            [e for e in self._events.values() if thesis_name in e.linked_theses],
+            key=lambda e: e.date,
+        )
+
+    def add_debrief(self, event_id: str, debrief_text: str) -> Optional[CatalystEvent]:
+        """Add a post-event debrief to a catalyst event."""
+        evt = self._events.get(event_id)
+        if evt:
+            evt.debrief = debrief_text
+            evt.completed = True
+            return evt
+        return None
+
+    def list_all(self) -> list[CatalystEvent]:
+        return sorted(self._events.values(), key=lambda e: e.date)
