@@ -1,0 +1,151 @@
+"""
+Emerson thesis lifecycle model.
+
+State machine: Spark → Draft → Active → Fortress → Closed
+Each thesis tracks conviction level, key assumptions, linked indicators,
+and version history.
+"""
+
+from enum import Enum
+from typing import Optional
+from datetime import datetime
+from pydantic import BaseModel, Field
+
+
+class ThesisStage(str, Enum):
+    """Thesis lifecycle stages from the Emerson spec."""
+    SPARK = "spark"        # Initial observation, not yet researched
+    DRAFT = "draft"        # Being researched, assumptions forming
+    ACTIVE = "active"      # Live thesis with position or watchlist entry
+    FORTRESS = "fortress"  # High conviction, well-tested, core holding
+    CLOSED = "closed"      # Thesis invalidated or position exited
+
+
+# Valid transitions
+VALID_TRANSITIONS = {
+    ThesisStage.SPARK: [ThesisStage.DRAFT, ThesisStage.CLOSED],
+    ThesisStage.DRAFT: [ThesisStage.ACTIVE, ThesisStage.SPARK, ThesisStage.CLOSED],
+    ThesisStage.ACTIVE: [ThesisStage.FORTRESS, ThesisStage.DRAFT, ThesisStage.CLOSED],
+    ThesisStage.FORTRESS: [ThesisStage.ACTIVE, ThesisStage.CLOSED],
+    ThesisStage.CLOSED: [],  # Terminal state
+}
+
+
+class ConvictionLevel(str, Enum):
+    """How strongly the investor believes in this thesis."""
+    LOW = "low"
+    MODERATE = "moderate"
+    HIGH = "high"
+    VERY_HIGH = "very_high"
+
+
+class ThesisAssumption(BaseModel):
+    """A key assumption underlying a thesis, with status tracking."""
+    id: str
+    text: str
+    status: str = "untested"  # untested, confirmed, challenged, invalidated
+    last_checked: Optional[datetime] = None
+    linked_indicator_ids: list[str] = []
+
+
+class Thesis(BaseModel):
+    """A complete investment thesis."""
+    id: str
+    title: str
+    stage: ThesisStage = ThesisStage.SPARK
+    conviction: ConvictionLevel = ConvictionLevel.LOW
+    summary: str = ""
+    tickers: list[str] = []
+    sector: str = ""
+    assumptions: list[ThesisAssumption] = []
+    linked_indicator_ids: list[str] = []
+    entry_criteria: str = ""
+    exit_criteria: str = ""
+    created_at: datetime = Field(default_factory=datetime.utcnow)
+    updated_at: datetime = Field(default_factory=datetime.utcnow)
+    closed_at: Optional[datetime] = None
+    close_reason: str = ""
+    notes: list[str] = []
+    version: int = 1
+
+    def can_transition_to(self, target: ThesisStage) -> bool:
+        return target in VALID_TRANSITIONS.get(self.stage, [])
+
+    def transition(self, target: ThesisStage, reason: str = "") -> "Thesis":
+        if not self.can_transition_to(target):
+            raise ValueError(
+                f"Cannot transition from {self.stage.value} to {target.value}. "
+                f"Valid targets: {[t.value for t in VALID_TRANSITIONS[self.stage]]}"
+            )
+        updated = self.model_copy(update={
+            "stage": target,
+            "updated_at": datetime.utcnow(),
+            "version": self.version + 1,
+        })
+        if target == ThesisStage.CLOSED:
+            updated.closed_at = datetime.utcnow()
+            updated.close_reason = reason
+        return updated
+
+
+class ThesisStore:
+    """In-memory thesis store with persistence hooks.
+
+    For the MCP test bed, this uses a simple dict.
+    Production would swap in PostgreSQL via the same interface.
+    """
+
+    def __init__(self):
+        self._theses: dict[str, Thesis] = {}
+        self._counter = 0
+
+    def _next_id(self) -> str:
+        self._counter += 1
+        return f"thesis_{self._counter:04d}"
+
+    def create(self, title: str, **kwargs) -> Thesis:
+        thesis_id = self._next_id()
+        thesis = Thesis(id=thesis_id, title=title, **kwargs)
+        self._theses[thesis_id] = thesis
+        return thesis
+
+    def get(self, thesis_id: str) -> Optional[Thesis]:
+        return self._theses.get(thesis_id)
+
+    def list_all(self, stage: Optional[ThesisStage] = None) -> list[Thesis]:
+        theses = list(self._theses.values())
+        if stage:
+            theses = [t for t in theses if t.stage == stage]
+        return sorted(theses, key=lambda t: t.updated_at, reverse=True)
+
+    def update(self, thesis_id: str, **kwargs) -> Optional[Thesis]:
+        thesis = self._theses.get(thesis_id)
+        if not thesis:
+            return None
+        updated = thesis.model_copy(update={
+            **kwargs,
+            "updated_at": datetime.utcnow(),
+            "version": thesis.version + 1,
+        })
+        self._theses[thesis_id] = updated
+        return updated
+
+    def transition(self, thesis_id: str, target: ThesisStage, reason: str = "") -> Thesis:
+        thesis = self._theses.get(thesis_id)
+        if not thesis:
+            raise ValueError(f"Thesis {thesis_id} not found")
+        updated = thesis.transition(target, reason)
+        self._theses[thesis_id] = updated
+        return updated
+
+    def stale_theses(self, days: int = 14) -> list[Thesis]:
+        """Find theses not updated in N days (excluding Closed)."""
+        now = datetime.utcnow()
+        stale = []
+        for t in self._theses.values():
+            if t.stage == ThesisStage.CLOSED:
+                continue
+            age = (now - t.updated_at).days
+            if age >= days:
+                stale.append(t)
+        return stale
